@@ -1,0 +1,12 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- duzy prostokat = plik przed, maly = po -->
+    <path android:fillColor="#5FA8E0"
+        android:pathData="M30,28h30v22h-30z" />
+    <path android:fillColor="#E0A55F"
+        android:pathData="M46,58h22v16h-22z" />
+    <!-- strzalka w dol miedzy nimi -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M39,54l6,0l0,-2l4,4l-4,4l0,-2l-6,0z" />
+</vector>
