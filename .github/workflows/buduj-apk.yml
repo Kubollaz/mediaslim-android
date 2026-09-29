@@ -1,0 +1,114 @@
+name: Buduj APK
+
+# Rusza samo po każdej zmianie w repozytorium, można też odpalić ręcznie
+# przyciskiem "Run workflow" w zakładce Actions.
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  budowanie:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Rozpakuj klucz podpisu
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d klucz/mediaslim.jks.b64 > klucz/mediaslim.jks
+          echo "Klucz gotowy ($(stat -c%s klucz/mediaslim.jks) bajtow)"
+
+      # shell: bash wlacza pipefail - bez tego nieudane budowanie
+      # przeszloby przez "tee" jako sukces i posypaloby sie dopiero dalej,
+      # w zupelnie niezwiazanym miejscu.
+      - name: Buduj
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee budowanie.log
+
+      - name: Co poszlo nie tak
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '## Budowanie sie nie udalo'
+            echo ''
+            echo 'Skopiuj ponizsze linijki i wklej Claude:'
+            echo ''
+            echo '```'
+            if [ -f budowanie.log ]; then
+              ISTOTNE=$(grep -E "^e: |error:|Caused by|What went wrong|Could not (find|resolve)" \
+                budowanie.log | head -40 || true)
+              if [ -n "$ISTOTNE" ]; then
+                echo "$ISTOTNE"
+              else
+                tail -40 budowanie.log
+              fi
+            else
+              echo "Budowanie przerwane, zanim powstal dziennik."
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Nazwij plik
+        id: nazwa
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "Nie znaleziono pliku APK." >&2
+            exit 1
+          fi
+          CEL="MediaSlim-0.1.${{ github.run_number }}.apk"
+          cp "$APK" "$CEL"
+          echo "plik=$CEL" >> "$GITHUB_OUTPUT"
+          echo "rozmiar=$(du -h "$CEL" | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Wydanie do pobrania na telefon
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "build-${{ github.run_number }}" \
+            --title "MediaSlim 0.1 (build ${{ github.run_number }})" \
+            --notes "Plik ${{ steps.nazwa.outputs.plik }} (${{ steps.nazwa.outputs.rozmiar }}). Otworz te strone na telefonie i pobierz APK." \
+            --latest \
+            "${{ steps.nazwa.outputs.plik }}"
+
+      - name: Kopia jako artefakt
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaSlim-APK
+          path: ${{ steps.nazwa.outputs.plik }}
+
+      - name: Podsumowanie
+        shell: bash
+        run: |
+          {
+            echo '## Gotowe'
+            echo ''
+            echo "Plik: **${{ steps.nazwa.outputs.plik }}** (${{ steps.nazwa.outputs.rozmiar }})"
+            echo ''
+            echo "Pobierz na telefonie: zakladka **Releases** -> **build-${{ github.run_number }}**"
+          } >> "$GITHUB_STEP_SUMMARY"
