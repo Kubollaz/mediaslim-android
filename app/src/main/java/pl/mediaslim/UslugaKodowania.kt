@@ -12,7 +12,6 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
-import androidx.core.app.ServiceCompat
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -71,8 +70,15 @@ class UslugaKodowania : Service() {
             }
             else -> {
                 if (zadanie?.isActive != true) {
+                    if (!startForegroundBezpiecznie("Przygotowuję…", "")) {
+                        // Nie udalo sie wejsc na pierwszy plan - konczymy czysto,
+                        // zamiast dac systemowi ubic aplikacje po pieciu sekundach.
+                        Stan.uslugaDziala = false
+                        Stan.wyczyscPoPracy()
+                        stopSelf()
+                        return START_NOT_STICKY
+                    }
                     Stan.uslugaDziala = true
-                    startForegroundBezpiecznie("Przygotowuję…", "")
                     zadanie = zakres.launch { pracuj() }
                 }
             }
@@ -202,7 +208,7 @@ class UslugaKodowania : Service() {
         Stan.uslugaDziala = false
         Stan.wyczyscPoPracy()
         Stan.odswiezListy()
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopForeground(Service.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
@@ -239,13 +245,39 @@ class UslugaKodowania : Service() {
 
     // -------------------------------------------------- powiadomienie
 
-    private fun startForegroundBezpiecznie(tytul: String, tresc: String) {
-        val typ = if (Build.VERSION.SDK_INT >= 35) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
+    /**
+     * Wejscie na pierwszy plan. Zwraca false, gdy system odmowil.
+     *
+     * NIE uzywamy tu ServiceCompat.startForeground. Ta metoda przycina zadany
+     * typ maska typow znanych w wersji biblioteki (FOREGROUND_SERVICE_TYPE_
+     * ALLOWED_SINCE_U), a mediaProcessing doszedl dopiero w Androidzie 15.
+     * Efekt: typ po cichu zamieniany na "none", a od targetSdk 34 usluga
+     * z typem none jest zabroniona - aplikacja wywalala sie przy starcie
+     * kodowania na Androidzie 15. Wolamy wiec wprost Service.startForeground
+     * (jest od API 29, a my mamy minSdk 30) i schodzimy na dataSync, gdyby
+     * konkretne urzadzenie nie przyjelo typu wlasciwego.
+     */
+    private fun startForegroundBezpiecznie(tytul: String, tresc: String): Boolean {
+        val powiadomienie = zbuduj(tytul, tresc)
+        val typy = if (Build.VERSION.SDK_INT >= 35) {
+            intArrayOf(
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
         } else {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            intArrayOf(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         }
-        ServiceCompat.startForeground(this, ID_POWIADOMIENIA, zbuduj(tytul, tresc), typ)
+        var ostatni: Exception? = null
+        for (typ in typy) {
+            try {
+                startForeground(ID_POWIADOMIENIA, powiadomienie, typ)
+                return true
+            } catch (e: Exception) {
+                ostatni = e
+            }
+        }
+        Stan.dopisz("Nie udało się uruchomić usługi w tle: ${ostatni?.message}")
+        return false
     }
 
     private fun powiadom(tytul: String, tresc: String) {
@@ -295,7 +327,7 @@ class UslugaKodowania : Service() {
         Stan.dopisz("System przerwał pracę po limicie czasu - reszta czeka")
         Stan.zmien { it.copy(stopPoPliku = true, stopTeraz = true) }
         zadaniePliku?.cancel()
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopForeground(Service.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
