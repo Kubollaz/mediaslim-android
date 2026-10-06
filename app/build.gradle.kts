@@ -20,7 +20,7 @@ android {
         // Numer budowania z GitHub Actions - kazda wersja ma wyzszy numer,
         // inaczej Android odmawia aktualizacji.
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-        versionName = "0.1." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+        versionName = "0.2." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
     }
 
     signingConfigs {

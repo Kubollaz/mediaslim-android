@@ -13,7 +13,12 @@ import android.net.Uri
  * Dzieki temu plik podmieniony albo edytowany gdzie indziej dostaje nowy
  * klucz i zostanie sprawdzony jeszcze raz, a nietkniety - pominiety.
  */
-class Baza(ctx: Context) : SQLiteOpenHelper(ctx, "mediaslim.db", null, 1) {
+class Baza(ctx: Context) : SQLiteOpenHelper(ctx, "mediaslim.db", null, WERSJA) {
+
+    companion object {
+        /** 2 = doszla kolumna czy_zdjecie (wersja 0.2 aplikacji). */
+        const val WERSJA = 2
+    }
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -36,15 +41,32 @@ class Baza(ctx: Context) : SQLiteOpenHelper(ctx, "mediaslim.db", null, 1) {
               plik_wyniku TEXT,
               rozmiar_wyniku INTEGER,
               nowy_uri TEXT,
-              kiedy INTEGER
+              kiedy INTEGER,
+              czy_zdjecie INTEGER DEFAULT 0
             )
             """.trimIndent()
         )
         db.execSQL("CREATE INDEX i_status ON pliki(status)")
     }
 
+    /**
+     * Dokladamy brakujace kolumny po nazwie, zamiast kasowac tabele.
+     * Baza trzyma informacje o tym, co juz jest w koszu systemowym -
+     * skasowanie jej odcieloby uzytkownika od przywrocenia oryginalow.
+     */
     override fun onUpgrade(db: SQLiteDatabase, stara: Int, nowa: Int) {
-        // Pierwsza wersja schematu - nie ma z czego migrowac.
+        val kolumny = HashSet<String>()
+        db.rawQuery("PRAGMA table_info(pliki)", null).use { k ->
+            val i = k.getColumnIndex("name")
+            while (k.moveToNext()) kolumny.add(k.getString(i))
+        }
+        if (!kolumny.contains("czy_zdjecie")) {
+            db.execSQL("ALTER TABLE pliki ADD COLUMN czy_zdjecie INTEGER DEFAULT 0")
+        }
+    }
+
+    override fun onDowngrade(db: SQLiteDatabase, stara: Int, nowa: Int) {
+        // Nic nie robimy - nowsze kolumny nie przeszkadzaja starszemu kodowi.
     }
 
     fun zapisz(
@@ -52,7 +74,8 @@ class Baza(ctx: Context) : SQLiteOpenHelper(ctx, "mediaslim.db", null, 1) {
         sciezkaWzgledna: String, dataZrobienia: Long, dataModyfikacji: Long,
         szerokosc: Int, wysokosc: Int, obrot: Int, maAudio: Boolean,
         status: String, powod: String,
-        plikWyniku: String? = null, rozmiarWyniku: Long = 0, nowyUri: String? = null
+        plikWyniku: String? = null, rozmiarWyniku: Long = 0, nowyUri: String? = null,
+        czyZdjecie: Boolean = false
     ) {
         val w = ContentValues().apply {
             put("klucz", klucz)
@@ -73,6 +96,7 @@ class Baza(ctx: Context) : SQLiteOpenHelper(ctx, "mediaslim.db", null, 1) {
             put("rozmiar_wyniku", rozmiarWyniku)
             put("nowy_uri", nowyUri)
             put("kiedy", System.currentTimeMillis())
+            put("czy_zdjecie", if (czyZdjecie) 1 else 0)
         }
         writableDatabase.insertWithOnConflict(
             "pliki", null, w, SQLiteDatabase.CONFLICT_REPLACE
@@ -95,7 +119,7 @@ class Baza(ctx: Context) : SQLiteOpenHelper(ctx, "mediaslim.db", null, 1) {
         readableDatabase.rawQuery(
             "SELECT klucz,uri,nazwa,rozmiar,rozmiar_wyniku,plik_wyniku," +
                 "sciezka_wzgledna,czas_ms,ma_audio,szerokosc,wysokosc,obrot," +
-                "data_zrobienia,data_modyfikacji,status,powod " +
+                "data_zrobienia,data_modyfikacji,status,powod,czy_zdjecie " +
                 "FROM pliki WHERE status = ? ORDER BY rozmiar DESC", arrayOf(status)
         ).use { k ->
             while (k.moveToNext()) {
@@ -116,7 +140,8 @@ class Baza(ctx: Context) : SQLiteOpenHelper(ctx, "mediaslim.db", null, 1) {
                         dataZrobienia = k.getLong(12),
                         dataModyfikacji = k.getLong(13),
                         status = k.getString(14) ?: "",
-                        powod = k.getString(15) ?: ""
+                        powod = k.getString(15) ?: "",
+                        czyZdjecie = k.getInt(16) == 1
                     )
                 )
             }
@@ -127,13 +152,15 @@ class Baza(ctx: Context) : SQLiteOpenHelper(ctx, "mediaslim.db", null, 1) {
     fun wKoszu(): List<WKoszu> {
         val lista = ArrayList<WKoszu>()
         readableDatabase.rawQuery(
-            "SELECT klucz,uri,nazwa,rozmiar FROM pliki " +
+            "SELECT klucz,uri,nazwa,rozmiar,czy_zdjecie FROM pliki " +
                 "WHERE status = 'podmieniony' ORDER BY rozmiar DESC", null
         ).use { k ->
             while (k.moveToNext()) {
                 lista.add(
-                    WKoszu(k.getString(0), Uri.parse(k.getString(1)),
-                        k.getString(2) ?: "", k.getLong(3))
+                    WKoszu(
+                        k.getString(0), Uri.parse(k.getString(1)),
+                        k.getString(2) ?: "", k.getLong(3), k.getInt(4) == 1
+                    )
                 )
             }
         }

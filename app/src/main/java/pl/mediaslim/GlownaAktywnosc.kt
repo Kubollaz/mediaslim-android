@@ -49,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -67,6 +68,7 @@ private fun potrzebneUprawnienia(): Array<String> {
     val lista = ArrayList<String>()
     if (Build.VERSION.SDK_INT >= 33) {
         lista.add(Manifest.permission.READ_MEDIA_VIDEO)
+        lista.add(Manifest.permission.READ_MEDIA_IMAGES)
         lista.add(Manifest.permission.POST_NOTIFICATIONS)
     } else {
         lista.add(Manifest.permission.READ_EXTERNAL_STORAGE)
@@ -75,12 +77,14 @@ private fun potrzebneUprawnienia(): Array<String> {
 }
 
 private fun maDostepDoFilmow(ctx: Context): Boolean {
-    val p = if (Build.VERSION.SDK_INT >= 33) {
-        Manifest.permission.READ_MEDIA_VIDEO
+    val potrzebne = if (Build.VERSION.SDK_INT >= 33) {
+        listOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_IMAGES)
     } else {
-        Manifest.permission.READ_EXTERNAL_STORAGE
+        listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
-    return ContextCompat.checkSelfPermission(ctx, p) == PackageManager.PERMISSION_GRANTED
+    return potrzebne.all {
+        ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED
+    }
 }
 
 @Composable
@@ -104,6 +108,7 @@ private fun Ekran() {
     val zaznaczone by Stan.zaznaczone.collectAsState()
     val pominiete by Stan.podsumowanieSkanu.collectAsState()
     val odswiez by Stan.odswiez.collectAsState()
+    val tryb by Stan.tryb.collectAsState()
 
     var zakladka by remember { mutableStateOf(0) }
     var maDostep by remember { mutableStateOf(maDostepDoFilmow(ctx)) }
@@ -149,6 +154,37 @@ private fun Ekran() {
     val pytanieOKoszOperacje = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { Stan.odswiezListy() }
+
+    // Systemowe zadanie na kosz potrafi NIE zwrocic bledu, tylko rzucic
+    // wyjatkiem prosto z dostawcy MediaStore - na adresie, ktorego juz
+    // nie ma w galerii. Bez tego jedno nieaktualne wejscie wywalalo
+    // aplikacje przy "Opróżnij".
+    fun wykonajKoszowe(zadanie: Podmiana.Zadanie, czynnosc: String) {
+        if (zadanie.martwe.isNotEmpty()) {
+            val doZapomnienia = wKoszu
+            zakres.launch {
+                withContext(Dispatchers.IO) {
+                    Podmiana.zapomnijMartwe(baza, doZapomnienia, zadanie.martwe)
+                }
+                Stan.odswiezListy()
+            }
+        }
+        val pi = zadanie.intent
+        val oMartwych =
+            if (zadanie.martwe.isEmpty()) ""
+            else " Z listy zniknęło ${zadanie.martwe.size} pozycji, " +
+                "których nie ma już w galerii."
+        if (pi == null) {
+            komunikat = "Nie udało się $czynnosc: ${zadanie.blad ?: "brak powodu"}.$oMartwych"
+            return
+        }
+        try {
+            pytanieOKoszOperacje.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+            if (oMartwych.isNotEmpty()) komunikat = oMartwych.trim()
+        } catch (e: Exception) {
+            komunikat = "System odrzucił żądanie: ${e.message ?: e.javaClass.simpleName}"
+        }
+    }
 
     LaunchedEffect(odswiez) {
         val (g, k) = withContext(Dispatchers.IO) {
@@ -225,6 +261,8 @@ private fun Ekran() {
 
         when (zakladka) {
             0 -> ZakladkaSkan(
+                tryb = tryb,
+                zmienTryb = { Stan.ustawTryb(it) },
                 profil = profil,
                 zmienProfil = { nowy ->
                     Ustawienia.ustawProfil(ctx, nowy.id)
@@ -238,22 +276,25 @@ private fun Ekran() {
                     zakres.launch {
                         Stan.zmien {
                             it.copy(
-                                trwa = true, etykieta = "Skanowanie", razem = 0,
+                                trwa = true, razem = 0,
+                            etykieta = if (tryb == "zdjecia") "Szukam zdjęć"
+                                       else "Szukam filmów",
                                 numer = 0, poczatek = System.currentTimeMillis(),
                                 sekundyRazem = 0.0, sekundyZrobione = 0.0, odzyskane = 0
                             )
                         }
                         val wynik = withContext(Dispatchers.IO) {
-                            Skaner.skanuj(
-                                ctx, baza, profil,
-                                postep = { n, nazwa ->
-                                    Stan.zmien { it.copy(numer = n, plik = nazwa) }
-                                },
-                                przerwane = {
-                                    Stan.praca.value.stopTeraz ||
-                                        Stan.praca.value.stopPoPliku
-                                }
-                            )
+                            val raport: (Int, String) -> Unit = { n, nazwa ->
+                                Stan.zmien { it.copy(numer = n, plik = nazwa) }
+                            }
+                            val stop: () -> Boolean = {
+                                Stan.praca.value.stopTeraz || Stan.praca.value.stopPoPliku
+                            }
+                            if (tryb == "zdjecia") {
+                                Skaner.skanujZdjecia(ctx, baza, profil, raport, stop)
+                            } else {
+                                Skaner.skanuj(ctx, baza, profil, raport, stop)
+                            }
                         }
                         Stan.ustawKandydatow(wynik.kandydaci, wynik.pominiete)
                         Stan.wyczyscPoPracy()
@@ -292,13 +333,33 @@ private fun Ekran() {
                         if (przygotowane.isEmpty()) {
                             komunikat = "Nie udało się przygotować kopii."
                         } else {
-                            pary = przygotowane
-                            val zadanie = Podmiana.zadanieKosza(
-                                ctx, przygotowane.map { it.wpis.uri }
-                            )
-                            pytanieOKosz.launch(
-                                IntentSenderRequest.Builder(zadanie.intentSender).build()
-                            )
+                            val zadanie = Podmiana.zadanieKosza(ctx, przygotowane)
+                            val pi = zadanie.intent
+                            if (pi == null) {
+                                pary = emptyList()
+                                withContext(Dispatchers.IO) {
+                                    przygotowane.forEach {
+                                        try {
+                                            ctx.contentResolver.delete(it.nowyUri, null, null)
+                                        } catch (e: Exception) {
+                                            // nic
+                                        }
+                                    }
+                                }
+                                komunikat = "Nie udało się przenieść oryginałów do kosza: " +
+                                    (zadanie.blad ?: "brak powodu") + ". Nic nie zmieniono."
+                            } else {
+                                pary = przygotowane
+                                try {
+                                    pytanieOKosz.launch(
+                                        IntentSenderRequest.Builder(pi.intentSender).build()
+                                    )
+                                } catch (e: Exception) {
+                                    pary = emptyList()
+                                    komunikat = "System odrzucił żądanie: " +
+                                        (e.message ?: e.javaClass.simpleName)
+                                }
+                            }
                         }
                     }
                 }
@@ -308,17 +369,15 @@ private fun Ekran() {
                 wKoszu = wKoszu,
                 przywroc = {
                     if (wKoszu.isNotEmpty()) {
-                        val z = Podmiana.zadaniePrzywrocenia(ctx, wKoszu.map { it.uri })
-                        pytanieOKoszOperacje.launch(
-                            IntentSenderRequest.Builder(z.intentSender).build()
+                        wykonajKoszowe(
+                            Podmiana.zadaniePrzywrocenia(ctx, wKoszu), "przywrócić"
                         )
                     }
                 },
                 oproznij = {
                     if (wKoszu.isNotEmpty()) {
-                        val z = Podmiana.zadanieKasowania(ctx, wKoszu.map { it.uri })
-                        pytanieOKoszOperacje.launch(
-                            IntentSenderRequest.Builder(z.intentSender).build()
+                        wykonajKoszowe(
+                            Podmiana.zadanieKasowania(ctx, wKoszu), "opróżnić kosza"
                         )
                     }
                 }
@@ -390,6 +449,8 @@ private fun KartaPostepu(praca: StanPracy, ctx: Context) {
 
 @Composable
 private fun ZakladkaSkan(
+    tryb: String,
+    zmienTryb: (String) -> Unit,
     profil: Profil,
     zmienProfil: (Profil) -> Unit,
     kandydaci: List<Film>,
@@ -404,6 +465,35 @@ private fun ZakladkaSkan(
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         item {
             Column(modifier = Modifier.padding(vertical = 10.dp)) {
+                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+                    listOf("wideo" to "Filmy", "zdjecia" to "Zdjęcia").forEach { (id, opis) ->
+                        val wybrany = tryb == id
+                        Card(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(end = 6.dp)
+                                .clickable(enabled = !trwa) { zmienTryb(id) },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (wybrany) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                }
+                            )
+                        ) {
+                            Text(
+                                opis,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                                textAlign = TextAlign.Center,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (wybrany) MaterialTheme.colorScheme.onPrimary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
                 Text("Jak mocno ściskać", fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 Ustawienia.PROFILE.forEach { p ->
                     Card(
@@ -433,12 +523,23 @@ private fun ZakladkaSkan(
                 }
                 Row(modifier = Modifier.padding(top = 10.dp)) {
                     Button(onClick = skanuj, enabled = !trwa) { Text("Skanuj galerię") }
-                    Box(modifier = Modifier.width(8.dp))
-                    if (kandydaci.isNotEmpty()) {
-                        OutlinedButton(onClick = { Stan.zaznaczWszystkie(zaznaczone.isEmpty()) }) {
-                            Text(if (zaznaczone.isEmpty()) "Zaznacz wszystkie" else "Odznacz")
+                }
+                if (kandydaci.isNotEmpty()) {
+                    Row(modifier = Modifier.padding(top = 8.dp)) {
+                        OutlinedButton(onClick = { Stan.zaznaczWszystkie(true) }) {
+                            Text("Zaznacz wszystkie", fontSize = 13.sp)
+                        }
+                        Box(modifier = Modifier.width(8.dp))
+                        OutlinedButton(onClick = { Stan.zaznaczWszystkie(false) }) {
+                            Text("Odznacz wszystkie", fontSize = 13.sp)
                         }
                     }
+                    Text(
+                        "Zaznaczone ${zaznaczone.size} z ${kandydaci.size}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
                 }
                 if (pominiete.isNotEmpty()) {
                     Text(
@@ -468,10 +569,16 @@ private fun ZakladkaSkan(
                 Column(modifier = Modifier.padding(start = 4.dp)) {
                     Text(film.nazwa, fontSize = 13.sp, maxLines = 1)
                     Text(
-                        "${waga(film.rozmiar)} → ok. ${waga(film.szacowanyRozmiar)} · " +
-                            "${film.szerokosc}x${film.wysokosc} · " +
-                            "${Math.round(film.fps)} kl/s · " +
-                            String.format(java.util.Locale.US, "%.1f", film.mbps) + " Mb/s",
+                        if (film.czyZdjecie) {
+                            "${waga(film.rozmiar)} → ok. ${waga(film.szacowanyRozmiar)} · " +
+                                "${film.pokazanaSzer}x${film.pokazanaWys} → " +
+                                "${film.docelowaSzer}x${film.docelowaWys}"
+                        } else {
+                            "${waga(film.rozmiar)} → ok. ${waga(film.szacowanyRozmiar)} · " +
+                                "${film.szerokosc}x${film.wysokosc} · " +
+                                "${Math.round(film.fps)} kl/s · " +
+                                String.format(java.util.Locale.US, "%.1f", film.mbps) + " Mb/s"
+                        },
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -486,7 +593,10 @@ private fun ZakladkaSkan(
                     enabled = !trwa && zaznaczone.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp)
                 ) {
-                    Text("Koduj zaznaczone (${zaznaczone.size}) — zysk ok. ${waga(zysk)}")
+                    Text(
+                        (if (tryb == "zdjecia") "Przerób zaznaczone" else "Koduj zaznaczone") +
+                            " (${zaznaczone.size}) — zysk ok. ${waga(zysk)}"
+                    )
                 }
             }
         }
@@ -503,9 +613,9 @@ private fun ZakladkaGotowe(gotowe: List<Gotowy>, podmien: () -> Unit) {
                     Text("Nic nie czeka na podmianę.", fontSize = 14.sp)
                 } else {
                     Text(
-                        "Każdy z tych plików przeszedł pięć testów: jest mniejszy, " +
-                            "ma tę samą długość, ma dźwięk, nie leży na boku i " +
-                            "zachował datę nagrania.",
+                        "Każdy z tych plików przeszedł komplet testów: jest mniejszy, " +
+                            "nie leży na boku, nie jest zniekształcony, a filmy " +
+                            "dodatkowo mają tę samą długość i ścieżkę dźwięku.",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

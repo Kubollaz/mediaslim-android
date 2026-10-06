@@ -99,9 +99,10 @@ class UslugaKodowania : Service() {
 
         Stan.zmien {
             it.copy(
-                trwa = true, etykieta = "Kodowanie", numer = 0, razem = kolejka.size,
+                trwa = true, numer = 0, razem = kolejka.size,
+                etykieta = if (kolejka.any { f -> f.czyZdjecie }) "Zdjęcia" else "Kodowanie",
                 poczatek = System.currentTimeMillis(), sekundyZrobione = 0.0,
-                sekundyRazem = kolejka.sumOf { f -> f.czasMs / 1000.0 }.coerceAtLeast(1.0),
+                sekundyRazem = kolejka.sumOf { f -> wagaCzasu(f) }.coerceAtLeast(1.0),
                 odzyskane = 0L, procentPliku = 0
             )
         }
@@ -122,10 +123,13 @@ class UslugaKodowania : Service() {
                     film.nazwa
                 )
 
-                // Telefon gorący - dajmy mu ochłonąć, inaczej system i tak zdławi koder
-                poczekajNaOchlodzenie(menedzerZasilania)
+                // Telefon gorący - dajmy mu ochłonąć, inaczej system i tak zdławi
+                // koder. Przy zdjęciach nie ma sensu: jedno idzie ułamek sekundy.
+                if (!film.czyZdjecie) poczekajNaOchlodzenie(menedzerZasilania)
 
-                val wynikPliku = File(katalog, "${film.id}_${System.currentTimeMillis()}.mp4")
+                val wynikPliku = File(
+                    katalog, "${film.id}_${System.currentTimeMillis()}.${film.rozszerzenie}"
+                )
 
                 if (Kodowanie.wolneMiejsce(katalog) < film.szacowanyRozmiar * 2 + 300L * 1024 * 1024) {
                     Stan.dopisz("BRAK MIEJSCA - przerywam przed ${film.nazwa}")
@@ -134,8 +138,13 @@ class UslugaKodowania : Service() {
 
                 var rezultat: RezultatKodowania = RezultatKodowania.Przerwane
                 val praca = zakres.launch {
-                    rezultat = Kodowanie.zakoduj(this@UslugaKodowania, film, wynikPliku) { p ->
+                    val raport: (Int) -> Unit = { p ->
                         Stan.zmien { it.copy(procentPliku = p) }
+                    }
+                    rezultat = if (film.czyZdjecie) {
+                        KodowanieZdjec.zakoduj(this@UslugaKodowania, film, wynikPliku, raport)
+                    } else {
+                        Kodowanie.zakoduj(this@UslugaKodowania, film, wynikPliku, raport)
                     }
                 }
                 zadaniePliku = praca
@@ -153,7 +162,7 @@ class UslugaKodowania : Service() {
                 }
 
                 Stan.zmien {
-                    it.copy(sekundyZrobione = it.sekundyZrobione + film.czasMs / 1000.0)
+                    it.copy(sekundyZrobione = it.sekundyZrobione + wagaCzasu(film))
                 }
 
                 when (val r = rezultat) {
@@ -169,7 +178,11 @@ class UslugaKodowania : Service() {
                     }
 
                     is RezultatKodowania.Udane -> {
-                        val powod = Weryfikacja.sprawdz(film, r.plik, film.dataZrobienia > 0)
+                        val powod = if (film.czyZdjecie) {
+                            Weryfikacja.sprawdzZdjecie(film, r.plik)
+                        } else {
+                            Weryfikacja.sprawdz(film, r.plik, film.dataZrobienia > 0)
+                        }
                         if (powod != null) {
                             r.plik.delete()
                             zapiszWpis(baza, film, "odrzucony", powod)
@@ -212,6 +225,14 @@ class UslugaKodowania : Service() {
         stopSelf()
     }
 
+    /**
+     * Ile "czasu pracy" wazy jeden plik na pasku postepu. Film wazy tyle,
+     * ile trwa; zdjecie nie ma dlugosci, wiec liczy sie jako jedna sztuka.
+     * Bez tego pasek przy zdjeciach staly na zerze.
+     */
+    private fun wagaCzasu(f: Film): Double =
+        if (f.czyZdjecie) 1.0 else f.czasMs / 1000.0
+
     private suspend fun poczekajNaOchlodzenie(pm: PowerManager) {
         var czekano = 0
         while (czekano < 600) {
@@ -239,7 +260,7 @@ class UslugaKodowania : Service() {
             film.klucz, film.uri, film.nazwa, film.rozmiar, film.czasMs,
             film.sciezkaWzgledna, film.dataZrobienia, film.dataModyfikacji,
             film.szerokosc, film.wysokosc, film.obrot, film.maAudio,
-            status, powod, plikWyniku, rozmiarWyniku
+            status, powod, plikWyniku, rozmiarWyniku, null, film.czyZdjecie
         )
     }
 

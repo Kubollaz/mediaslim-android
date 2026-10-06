@@ -48,6 +48,10 @@ object Stan {
     private val _odswiez = MutableStateFlow(0)
     val odswiez: StateFlow<Int> = _odswiez
 
+    /** "wideo" albo "zdjecia" - co skanujemy i kodujemy. */
+    private val _tryb = MutableStateFlow("wideo")
+    val tryb: StateFlow<String> = _tryb
+
     /** Kolejka przekazywana do uslugi kodowania. */
     @Volatile
     var kolejka: List<Film> = emptyList()
@@ -55,6 +59,15 @@ object Stan {
     /** Czy usluga kodowania faktycznie pracuje - UI nie budzi martwej uslugi. */
     @Volatile
     var uslugaDziala: Boolean = false
+
+    fun ustawTryb(nowy: String) {
+        if (_tryb.value == nowy) return
+        _tryb.value = nowy
+        // Lista z poprzedniego trybu nie ma tu nic do roboty.
+        _kandydaci.value = emptyList()
+        _zaznaczone.value = emptySet()
+        _podsumowanieSkanu.value = emptyMap()
+    }
 
     fun ustawKandydatow(lista: List<Film>, pominiete: Map<String, Int>) {
         _kandydaci.value = lista

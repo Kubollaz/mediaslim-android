@@ -10,6 +10,10 @@ import android.content.Context
  * bppProgu     - ponizej tego plik jest juz oszczedny i go nie ruszamy;
  *                musi byc wyzszy od bppKodowania, inaczej wynik wyszedlby
  *                wiekszy od oryginalu
+ *
+ * maxBokZdjecia - dluzszy bok zdjecia po zmniejszeniu. 2500 px to odbitka
+ *                 15x21 cm przy 300 dpi, czyli najwiekszy format, jaki
+ *                 ktokolwiek realnie drukuje z telefonu.
  */
 data class Profil(
     val id: String,
@@ -18,7 +22,10 @@ data class Profil(
     val maxDluzszyBok: Int,
     val bppKodowania: Double,
     val bppProgu: Double,
-    val minMB: Int
+    val minMB: Int,
+    val maxBokZdjecia: Int,
+    val jakoscZdjecia: Int,
+    val minMBZdjecia: Int
 )
 
 object Ustawienia {
@@ -26,18 +33,21 @@ object Ustawienia {
     val PROFILE = listOf(
         Profil(
             "ostrozny", "Ostrożny",
-            "Tylko duże filmy, najwyższa jakość. Mały zysk, zero ryzyka.",
-            1920, 0.075, 0.10, 50
+            "Tylko duże pliki, najwyższa jakość. Mały zysk, zero ryzyka.",
+            1920, 0.075, 0.10, 50,
+            3550, 94, 5
         ),
         Profil(
             "zrownowazony", "Zrównoważony",
             "Ustawienia sprawdzone na archiwum 1459 filmów. Zalecany.",
-            1920, 0.060, 0.08, 20
+            1920, 0.060, 0.08, 20,
+            2500, 92, 2
         ),
         Profil(
             "agresywny", "Maksymalny zysk",
             "Mniejsze pliki, strata widoczna na dużym ekranie.",
-            1280, 0.045, 0.06, 10
+            1280, 0.045, 0.06, 10,
+            2048, 88, 1
         )
     )
 

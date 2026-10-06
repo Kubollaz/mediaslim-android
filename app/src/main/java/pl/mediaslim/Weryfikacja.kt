@@ -1,5 +1,7 @@
 package pl.mediaslim
 
+import android.graphics.BitmapFactory
+import android.media.ExifInterface
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
@@ -7,7 +9,7 @@ import java.io.File
 import kotlin.math.abs
 
 /**
- * Piec testow, ktore plik musi przejsc, zanim podmienimy nim oryginal.
+ * Testy, ktore plik musi przejsc, zanim podmienimy nim oryginal.
  * Kazdy z nich powstal po konkretnej wpadce na wersji na Windows.
  */
 object Weryfikacja {
@@ -106,8 +108,8 @@ object Weryfikacja {
         if (film.maAudio && !w.maAudio) return "BRAK ŚCIEŻKI DŹWIĘKU"
 
         // Orientacja liczona tak, jak zobaczy ja galeria: piksele plus obrot.
-        val zrodloSzer = if (film.obrot == 90 || film.obrot == 270) film.wysokosc else film.szerokosc
-        val zrodloWys = if (film.obrot == 90 || film.obrot == 270) film.szerokosc else film.wysokosc
+        val zrodloSzer = film.pokazanaSzer
+        val zrodloWys = film.pokazanaWys
         val ukladZrodla = when {
             zrodloSzer > zrodloWys -> "poziomy"
             zrodloWys > zrodloSzer -> "pionowy"
@@ -124,6 +126,77 @@ object Weryfikacja {
         }
 
         if (zrodloMaDate && !w.maDate) return "zgubiona data nagrania"
+
+        return null
+    }
+
+    /**
+     * To samo dla zdjecia. Osobno, bo zdjecie nie ma sciezki dzwieku
+     * ani dlugosci, za to ma wlasna pulapke: znacznik orientacji, ktory
+     * po przerobieniu musi byc "normalny", inaczej galeria obroci obraz
+     * drugi raz.
+     */
+    fun sprawdzZdjecie(film: Film, plik: File): String? {
+        if (!plik.exists() || plik.length() == 0L) return "plik wynikowy nie powstał"
+        if (plik.length() >= film.rozmiar) {
+            val proc = Math.round(100.0 * plik.length() / film.rozmiar)
+            return "wynik nie jest mniejszy ($proc% oryginału)"
+        }
+
+        val opcje = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(plik.absolutePath, opcje)
+        val szer = opcje.outWidth
+        val wys = opcje.outHeight
+        if (szer < 2 || wys < 2) return "nie da się odczytać wyniku"
+
+        val znacznik = try {
+            ExifInterface(plik.absolutePath)
+                .getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL
+                )
+        } catch (e: Exception) {
+            ExifInterface.ORIENTATION_NORMAL
+        }
+        if (znacznik != ExifInterface.ORIENTATION_NORMAL &&
+            znacznik != ExifInterface.ORIENTATION_UNDEFINED
+        ) {
+            return "ZNACZNIK OBROTU w wyniku ($znacznik) - galeria obróciłaby drugi raz"
+        }
+
+        val ukladZrodla = when {
+            film.pokazanaSzer > film.pokazanaWys -> "poziomy"
+            film.pokazanaWys > film.pokazanaSzer -> "pionowy"
+            else -> "kwadrat"
+        }
+        val ukladWyniku = when {
+            szer > wys -> "poziomy"
+            wys > szer -> "pionowy"
+            else -> "kwadrat"
+        }
+        if (ukladZrodla != ukladWyniku) {
+            return "OBRÓCONE: oryginał $ukladZrodla ${film.pokazanaSzer}x${film.pokazanaWys}, " +
+                "wynik $ukladWyniku ${szer}x$wys"
+        }
+
+        val propZrodla = film.pokazanaSzer.toDouble() / film.pokazanaWys
+        val propWyniku = szer.toDouble() / wys
+        if (abs(propZrodla - propWyniku) / propZrodla > 0.03) {
+            return "ZNIEKSZTAŁCONE: proporcje %.3f -> %.3f".format(propZrodla, propWyniku)
+        }
+
+        if (film.dataZrobienia > 0) {
+            val maDate = try {
+                val e = ExifInterface(plik.absolutePath)
+                !e.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL).isNullOrBlank() ||
+                    !e.getAttribute(ExifInterface.TAG_DATETIME).isNullOrBlank()
+            } catch (e: Exception) {
+                false
+            }
+            // Data trafia tez do wpisu w galerii przy podmianie, wiec sam
+            // brak znacznika w pliku nie jest powodem do odrzucenia -
+            // ale warto go odnotowac w dzienniku.
+            if (!maDate) Stan.dopisz("UWAGA ${film.nazwa}: brak daty w EXIF wyniku")
+        }
 
         return null
     }
